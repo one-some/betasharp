@@ -1,3 +1,5 @@
+extern alias JavaModStubs;
+
 using System.Diagnostics;
 using System.Runtime;
 using System.Runtime.InteropServices;
@@ -9,6 +11,7 @@ using BetaSharp.Client.DynamicTexture;
 using BetaSharp.Client.Entities;
 using BetaSharp.Client.Guis;
 using BetaSharp.Client.Input;
+using BetaSharp.Client.Modding.Java;
 using BetaSharp.Client.Network;
 using BetaSharp.Client.Options;
 using BetaSharp.Client.Rendering;
@@ -32,6 +35,7 @@ using BetaSharp.Util.Maths;
 using BetaSharp.Worlds;
 using BetaSharp.Worlds.Colors;
 using BetaSharp.Worlds.Storage;
+using com.sun.tools.@internal.xjc;
 using ImGuiNET;
 using Microsoft.Extensions.Logging;
 using Silk.NET.Input;
@@ -82,6 +86,7 @@ public partial class BetaSharp
     public MouseHelper mouseHelper;
     public TexturePacks texturePackList;
     private string gameDataDir;
+    public JavaModManager javaModManager;
     private IWorldStorageSource saveLoader;
     public static long[] frameTimes = new long[512];
     public static long[] tickTimes = new long[512];
@@ -120,6 +125,8 @@ public partial class BetaSharp
     public bool isControllerMode;
     public float virtualCursorX;
     public float virtualCursorY;
+    
+    private JavaModStubs::net.minecraft.client.Minecraft modMcStub;
 
     public BetaSharp(int width, int height, bool isFullscreen)
     {
@@ -237,6 +244,12 @@ public partial class BetaSharp
         }
         texturePackList = new TexturePacks(this, new DirectoryInfo(gameDataDir));
         textureManager = new TextureManager(this, texturePackList, options);
+
+        javaModManager = new JavaModManager(
+            this,
+            new DirectoryInfo(Path.Combine(gameDataDir, "mods", "java"))
+        );
+
         fontRenderer = new TextRenderer(options, textureManager);
         skinManager = new SkinManager(textureManager);
         WaterColors.loadColors(textureManager.GetColors("/misc/watercolor.png"));
@@ -252,6 +265,11 @@ public partial class BetaSharp
         {
             return format.formatString(global::BetaSharp.Achievements.OpenInventory.TranslationKey);
         };
+
+        modMcStub = new JavaModStubs::net.minecraft.client.Minecraft();
+        modMcStub._game = this;
+        modMcStub._world = world;
+        javaModManager.LoadMods();
 
         loadScreen();
 
@@ -1423,6 +1441,8 @@ public partial class BetaSharp
         systemTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
 ;
         Profiler.PopGroup();
+
+        JavaModStubs::ModLoader.OnTick(modMcStub);
     }
 
     private void processInputEvents()

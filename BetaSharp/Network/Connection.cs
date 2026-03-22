@@ -39,8 +39,10 @@ public class Connection
 
         _networkStream = new NetworkStream(socket);
 
-        Task.Factory.StartNew(Reading, TaskCreationOptions.LongRunning);
-        Task.Factory.StartNew(Writing, TaskCreationOptions.LongRunning);
+        //Task.Factory.StartNew(Reading, TaskCreationOptions.LongRunning);
+        //Task.Factory.StartNew(Writing, TaskCreationOptions.LongRunning);
+        new Thread(Reading).Start();
+        new Thread(Writing).Start();
     }
 
     protected Connection()
@@ -160,7 +162,7 @@ public class Connection
         return delayedSendQueue.Count;
     }
 
-    private async void Reading()
+    private void Reading()
     {
         while (open && !closed)
         {
@@ -180,8 +182,6 @@ public class Connection
                     disconnect("disconnect.endOfStream");
                     break;
                 }
-
-                await Task.Delay(10);
             }
             catch (Exception exception)
             {
@@ -191,7 +191,7 @@ public class Connection
         }
     }
 
-    private async void Writing()
+    private void Writing()
     {
         while (open && !closed)
         {
@@ -230,8 +230,6 @@ public class Connection
                 }
 
                 _networkStream.Flush();
-
-                await Task.Delay(10);
             }
             catch (Exception exception)
             {
