@@ -7,12 +7,13 @@ public class ModLoader
 
     public static void OnTick(Minecraft mc)
     {
-        Console.WriteLine("DOne output doneeee");
+        // This needs to be fixed
         if (mc.theWorld != null)
         {
             foreach (var item in inGameHooks)
             {
-                if (!item.Value && !item.Key.OnTickInGame(mc))
+                bool ticked = item.Key.OnTickInGame(mc);
+                if (!item.Value || !ticked)
                 {
                     inGameHooks.Remove(item.Key);
                 }

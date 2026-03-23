@@ -5,7 +5,7 @@ public class BaseMod
 {
     public virtual bool OnTickInGame(Minecraft mc)
     {
-        // TODO
+        Console.WriteLine("overwrite me or die");
         return true;
     }
 

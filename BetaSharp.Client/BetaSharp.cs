@@ -46,7 +46,7 @@ using GLEnum = BetaSharp.Client.Rendering.Core.OpenGL.GLEnum;
 
 namespace BetaSharp.Client;
 
-public partial class BetaSharp
+public partial class BetaSharp : IGame
 {
     public static BetaSharp Instance = null!;
     private readonly ILogger<BetaSharp> _logger = Log.Instance.For<BetaSharp>();
@@ -57,7 +57,12 @@ public partial class BetaSharp
     public int displayHeight;
 
     public Timer Timer { get; } = new(20.0F);
+
     public World world;
+    World? IGame.world => world;
+    EntityPlayer IGame.player => player;
+    bool IGame.isExternalMultiplayer => isMultiplayerWorld() && internalServer == null;
+
     public WorldRenderer terrainRenderer;
     public ClientPlayerEntity player;
     public EntityLiving camera;
@@ -266,9 +271,11 @@ public partial class BetaSharp
             return format.formatString(global::BetaSharp.Achievements.OpenInventory.TranslationKey);
         };
 
-        modMcStub = new JavaModStubs::net.minecraft.client.Minecraft();
-        modMcStub._game = this;
-        modMcStub._world = world;
+        Modding.Java.IkvmPatches.Apply();
+        JavaModStubs::org.lwjgl.input.Keyboard.IsKeyDownDelegate = Input.Keyboard.isKeyDown;
+        WireJavaModDelegates();
+        modMcStub = new JavaModStubs::net.minecraft.client.Minecraft(this);
+        JavaModStubs::net.minecraft.client.Minecraft.a = modMcStub;
         javaModManager.LoadMods();
 
         loadScreen();
@@ -359,6 +366,299 @@ public partial class BetaSharp
         {
             displayGuiScreen(new GuiMainMenu());
         }
+    }
+
+    private readonly Rendering.Items.ItemRenderer _javaItemRenderer = new();
+    private readonly Dictionary<string, Rendering.Core.Textures.TextureHandle> _javaTextureCache = new();
+    private readonly Dictionary<int, Rendering.Core.Textures.TextureHandle> _javaTextureIdMap = new();
+    private int _javaTextureIdCounter = 1;
+
+    private void WireJavaModDelegates()
+    {
+        // GL11 delegates
+        JavaModStubs::org.lwjgl.opengl.GL11.EnableDelegate = cap =>
+            GLManager.GL.Enable((Rendering.Core.OpenGL.GLEnum)cap);
+        JavaModStubs::org.lwjgl.opengl.GL11.DisableDelegate = cap =>
+            GLManager.GL.Disable((Rendering.Core.OpenGL.GLEnum)cap);
+        JavaModStubs::org.lwjgl.opengl.GL11.PushMatrixDelegate = () =>
+            GLManager.GL.PushMatrix();
+        JavaModStubs::org.lwjgl.opengl.GL11.PopMatrixDelegate = () =>
+            GLManager.GL.PopMatrix();
+        JavaModStubs::org.lwjgl.opengl.GL11.TranslatefDelegate = (x, y, z) =>
+            GLManager.GL.Translate(x, y, z);
+        JavaModStubs::org.lwjgl.opengl.GL11.RotatefDelegate = (angle, x, y, z) =>
+            GLManager.GL.Rotate(angle, x, y, z);
+        JavaModStubs::org.lwjgl.opengl.GL11.ScalefDelegate = (x, y, z) =>
+            GLManager.GL.Scale(x, y, z);
+        JavaModStubs::org.lwjgl.opengl.GL11.Color4fDelegate = (r, g, b, a) =>
+            GLManager.GL.Color4(r, g, b, a);
+
+        // Gui rendering delegates
+        // Gui (ub) rendering delegates
+        JavaModStubs::ub.DrawGradientRectDelegate = (x1, y1, x2, y2, c1, c2) =>
+            Guis.Gui.DrawGradientRect(x1, y1, x2, y2,
+                Guis.Color.FromArgb(unchecked((uint)c1)), Guis.Color.FromArgb(unchecked((uint)c2)));
+        JavaModStubs::ub.DrawDefaultBackgroundDelegate = () =>
+        {
+            if (currentScreen is Guis.GuiScreen screen)
+                screen.DrawDefaultBackground();
+        };
+
+        // DrawInventoryBackground — called from generated ue.a(float) bytecode
+        JavaModStubs::da.DrawInventoryBackgroundDelegate = () =>
+        {
+            var tex = textureManager.GetTextureId("/gui/inventory.png");
+            GLManager.GL.Color4(1.0f, 1.0f, 1.0f, 1.0f);
+            textureManager.BindTexture(tex);
+            if (currentScreen is Guis.GuiScreen screen)
+            {
+                int guiLeft = (screen.Width - 176) / 2;
+                int guiTop = (screen.Height - 166) / 2;
+                screen.DrawTexturedModalRect(guiLeft, guiTop, 0, 0, 176, 166);
+            }
+        };
+
+        // GuiIngame (uq) delegate — TMI uses v.a(String) to show chat messages
+        JavaModStubs::uq.AddChatMessageDelegate = msg =>
+        {
+            Console.WriteLine($"[TMI Chat] {msg}");
+            ingameGUI?.addChatMessage(msg);
+        };
+
+        // FontRenderer delegates
+        JavaModStubs::sj.DrawStringDelegate = (text, x, y, color) =>
+        {
+            // MC uses 24-bit RGB colors; force alpha to 0xFF when 0
+            uint c = unchecked((uint)color);
+            if ((c & 0xFF000000) == 0) c |= 0xFF000000;
+            fontRenderer.DrawStringWithShadow(text, x, y, Guis.Color.FromArgb(c));
+        };
+        JavaModStubs::sj.GetStringWidthDelegate = text =>
+            fontRenderer.GetStringWidth(text);
+
+        // RenderHelper delegates (u)
+        JavaModStubs::u.EnableStandardItemLightingDelegate = () =>
+            Rendering.Core.Lighting.turnOn();
+        JavaModStubs::u.DisableStandardItemLightingDelegate = () =>
+            Rendering.Core.Lighting.turnOff();
+
+        // RenderItem delegates (bb) — item rendering in GUI
+        JavaModStubs::bb.RenderItemIntoGUIDelegate = (font, renderEngine, itemStack, x, y) =>
+        {
+            if (itemStack != null)
+            {
+                var csharpStack = new global::BetaSharp.Items.ItemStack(itemStack.c, itemStack.a, itemStack.d);
+                _javaItemRenderer.renderItemIntoGUI(fontRenderer, textureManager, csharpStack, x, y);
+            }
+        };
+        JavaModStubs::bb.RenderItemOverlayDelegate = (font, renderEngine, itemStack, x, y) =>
+        {
+            if (itemStack != null)
+            {
+                var csharpStack = new global::BetaSharp.Items.ItemStack(itemStack.c, itemStack.a, itemStack.d);
+                _javaItemRenderer.renderItemOverlayIntoGUI(fontRenderer, textureManager, csharpStack, x, y);
+            }
+        };
+
+        // RenderEngine delegates (ji) — texture loading/binding
+        JavaModStubs::ji.GetTextureDelegate = path =>
+        {
+            if (!_javaTextureCache.TryGetValue(path, out var handle))
+            {
+                handle = textureManager.GetTextureId(path);
+                _javaTextureCache[path] = handle;
+                int id = _javaTextureIdCounter++;
+                _javaTextureIdMap[id] = handle;
+                return id;
+            }
+            // Find existing ID for this handle
+            foreach (var kvp in _javaTextureIdMap)
+            {
+                if (kvp.Value == handle) return kvp.Key;
+            }
+            int newId = _javaTextureIdCounter++;
+            _javaTextureIdMap[newId] = handle;
+            return newId;
+        };
+        JavaModStubs::ji.BindTextureDelegate = id =>
+        {
+            if (_javaTextureIdMap.TryGetValue(id, out var handle))
+                textureManager.BindTexture(handle);
+        };
+
+        // Minecraft.a("minecraft") → game working directory
+        JavaModStubs::net.minecraft.client.Minecraft.GetGameDirDelegate = () =>
+            Environment.CurrentDirectory;
+
+        // closeScreen → set currentScreen to null
+        JavaModStubs::gs.CloseScreenDelegate = () => displayGuiScreen(null);
+
+        // InventoryPlayer.addItemStackToInventory — route through server for proper sync
+        JavaModStubs::ix.AddItemDelegate = javaStack =>
+        {
+            if (javaStack != null && player != null)
+            {
+                // Find the server player and add to their inventory directly
+                if (internalServer != null)
+                {
+                    // Name may differ between client/server — find by name or fall back to first player
+                    var serverPlayer = internalServer.playerManager.getPlayer(player.name);
+                    if (serverPlayer == null && internalServer.playerManager.players.Count > 0)
+                        serverPlayer = internalServer.playerManager.players[0];
+                    if (serverPlayer != null)
+                    {
+                        int count = Math.Clamp(javaStack.a, 1, 64);
+                        var stack = new Items.ItemStack(javaStack.c, count, javaStack.d);
+                        serverPlayer.inventory.addItemStackToInventory(stack);
+                    }
+                }
+                else
+                {
+                    // External multiplayer — use /give command
+                    int count = Math.Clamp(javaStack.a, 1, 64);
+                    player.sendChatMessage($"/give {javaStack.c} {count}");
+                }
+            }
+        };
+
+        // EntityPlayer.sendChat — forward to player's sendChatMessage
+        JavaModStubs::gs.SendChatDelegate = msg =>
+        {
+            if (player != null && msg != null)
+                player.sendChatMessage(msg);
+        };
+
+        // Container.SyncSlots — populate Java slot list from real ScreenHandler
+        JavaModStubs::dw.SyncSlotsDelegate = container =>
+        {
+            if (player == null) return;
+            var handler = player.playerScreenHandler;
+            if (handler == null) return;
+
+            var slots = handler.Slots;
+            // Initialize gp slots if not already done or size changed
+            if (container.e.size() != slots.Count)
+            {
+                container.e = new java.util.ArrayList();
+                container.d = new java.util.ArrayList();
+                for (int i = 0; i < slots.Count; i++)
+                {
+                    var slot = new JavaModStubs::gp();
+                    slot.a = slots[i].id;
+                    slot.b = slots[i].xDisplayPosition;
+                    slot.c = slots[i].yDisplayPosition;
+                    container.e.add(slot);
+                    container.d.add(null); // inventoryItemStacks placeholder
+                }
+            }
+
+            // Sync stack data
+            for (int i = 0; i < slots.Count; i++)
+            {
+                var gp = (JavaModStubs::gp)container.e.get(i);
+                var csharpStack = slots[i].getStack();
+                if (csharpStack != null)
+                {
+                    gp._stack ??= new JavaModStubs::iz();
+                    gp._stack.c = csharpStack.itemId;
+                    gp._stack.a = csharpStack.count;
+                    gp._stack.d = csharpStack.getDamage();
+                }
+                else
+                {
+                    gp._stack = null;
+                }
+            }
+        };
+
+        // PlayerController.slotClick — forward to real ScreenHandler
+        JavaModStubs::ob.SlotClickDelegate = (windowId, slotId, mouseButton, shift, javaPlayer) =>
+        {
+            if (player != null)
+                playerController.func_27174_a(windowId, slotId, mouseButton, shift, player);
+        };
+
+        // PlayerController.closeContainer
+        JavaModStubs::ob.CloseContainerDelegate = (windowId, javaPlayer) =>
+        {
+            if (player != null)
+                playerController.func_20086_a(windowId, player);
+        };
+
+        // StringTranslate delegate — forward to BetaSharp's translation system
+        JavaModStubs::nh.TranslateDelegate = key =>
+            Stats.StatCollector.TranslateToLocal(key);
+
+        // Populate gm.c (Item.itemsList) from BetaSharp's item/block registries
+        PopulateJavaItemsList();
+    }
+
+    private void PopulateJavaItemsList()
+    {
+        int count = 0;
+
+        // Blocks (0-255) — blocks are also items in MC
+        for (int i = 0; i < 256 && i < JavaModStubs::gm.c.Length; i++)
+        {
+            var block = Blocks.Block.Blocks[i];
+            if (block != null)
+            {
+                var item = Items.Item.ITEMS[i]; // ItemBlock entries
+                var gm = new JavaModStubs::gm();
+                gm.bf = i;
+                gm._iconIndex = block.textureId;
+                gm._itemName = block.getBlockName();
+                gm._maxStackSize = item?.maxCount ?? 64;
+                JavaModStubs::gm.c[i] = gm;
+                count++;
+            }
+        }
+
+        // Items (256+)
+        for (int i = 256; i < Items.Item.ITEMS.Length && i < JavaModStubs::gm.c.Length; i++)
+        {
+            var item = Items.Item.ITEMS[i];
+            if (item != null)
+            {
+                var gm = new JavaModStubs::gm();
+                gm.bf = i;
+                gm._iconIndex = item.getTextureId(0);
+                gm._itemName = item.getItemName();
+                gm._maxStackSize = item.maxCount;
+                JavaModStubs::gm.c[i] = gm;
+                count++;
+            }
+        }
+
+        Console.WriteLine($"[BetaSharp] Populated gm.c with {count} items");
+    }
+
+    private Guis.GuiScreen? TryCreateJavaInventoryScreen()
+    {
+        try
+        {
+            // Update stub fields so Java code sees current state
+            modMcStub.UpdateFields();
+
+            // Sync GameSettings inventory key
+            modMcStub.z.r.b = options.KeyBindInventory.keyCode;
+
+            var javaScreen = javaModManager.TryCreateJavaGuiContainer(
+                modMcStub.h.d, // player's inventorySlots (dw)
+                modMcStub);
+
+            if (javaScreen != null)
+            {
+                Console.WriteLine("[BetaSharp] Using Java mod inventory screen");
+                return new Modding.Java.JavaScreenAdapter(javaScreen, modMcStub);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[BetaSharp] Java inventory screen failed: {ex}");
+        }
+
+        return null;
     }
 
     private void loadScreen()
@@ -1442,6 +1742,7 @@ public partial class BetaSharp
 ;
         Profiler.PopGroup();
 
+        modMcStub.UpdateFields();
         JavaModStubs::ModLoader.OnTick(modMcStub);
     }
 
@@ -1584,7 +1885,7 @@ public partial class BetaSharp
 
                         if (Keyboard.getEventKey() == options.KeyBindInventory.keyCode)
                         {
-                            displayGuiScreen(new GuiInventory(player));
+                            displayGuiScreen(TryCreateJavaInventoryScreen() ?? new GuiInventory(player));
                         }
 
                         if (Keyboard.getEventKey() == options.KeyBindDrop.keyCode)
